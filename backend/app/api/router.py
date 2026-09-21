@@ -117,13 +117,21 @@ def cancel_call(call_id: int, db: Session = Depends(get_db)):
         db.refresh(ticket)
         return ticket
 
+    # assigned：终态 cancelled，并回退轿厢载荷；载荷归零则方向回 idle，楼层不动
     car = db.get(ElevatorCar, ticket.assigned_car_id)
     ticket.status = "cancelled"
+    if car is not None:
+        car.load = max(0, car.load - ticket.passengers)
+        if car.load == 0:
+            car.direction = "idle"
+        detail = f"乘客取消，{car.label} 载荷回退 {ticket.passengers} 人"
+    else:
+        detail = "乘客取消"
     db.add(
         DispatchLog(
             call_id=ticket.id,
             car_id=car.id if car else None,
-            detail="乘客取消",
+            detail=detail,
         )
     )
     db.commit()
@@ -138,7 +146,8 @@ def replay(db: Session = Depends(get_db)):
 
 @api_router.get("/congestion", response_model=list[CongestionFloor])
 def congestion(db: Session = Depends(get_db)):
-    waiting = db.scalars(select(CallTicket).where(CallTicket.status.in_(("waiting", "cancelled", "assigned")))).all()
+    # 仅 waiting 计入楼层拥堵：assigned 乘客已占轿厢载荷，cancelled 不再计入
+    waiting = db.scalars(select(CallTicket).where(CallTicket.status == "waiting")).all()
     counts = congestion_by_floor(
         [CallRequest(c.id, c.floor, c.direction, c.passengers) for c in waiting]
     )
