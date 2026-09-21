@@ -29,7 +29,7 @@ export default function CallsPage() {
     try {
       await api(`/calls/${c.id}/cancel`, { method: "POST" });
       reload();
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); reload(); }
   }
   return (<>
     <h2>呼梯</h2>

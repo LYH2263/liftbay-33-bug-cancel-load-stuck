@@ -64,6 +64,12 @@ def dispatch(body: DispatchRequest, db: Session = Depends(get_db)):
     ticket = db.get(CallTicket, body.call_id)
     if not ticket:
         raise HTTPException(404, "呼梯不存在")
+    if ticket.status == "cancelled":
+        raise HTTPException(400, "呼梯已取消，不可再派工")
+    if ticket.status == "rejected":
+        raise HTTPException(400, "呼梯已拒派，不可再派工")
+    if ticket.status == "assigned":
+        raise HTTPException(400, "呼梯已派工，不可重复派工")
     if ticket.status != "waiting":
         raise HTTPException(400, "呼梯已处理")
     car_rows = db.scalars(
@@ -112,18 +118,29 @@ def cancel_call(call_id: int, db: Session = Depends(get_db)):
     if ticket.status != "assigned":
         # waiting：仅落状态，待派列表与拥堵均按 waiting 过滤，自动不再计入
         ticket.status = "cancelled"
-        db.add(DispatchLog(call_id=ticket.id, car_id=None, detail="乘客取消等待呼梯"))
+        db.add(DispatchLog(call_id=ticket.id, car_id=None, detail="乘客取消等待呼梯（未派工，无载荷回退）"))
         db.commit()
         db.refresh(ticket)
         return ticket
 
     car = db.get(ElevatorCar, ticket.assigned_car_id)
     ticket.status = "cancelled"
+    detail = "乘客取消（轿厢记录缺失，无法回退载荷）"
+    if car is not None:
+        # 回退派工时占用的轿厢载荷；无人在厢时恢复空闲，楼层保持
+        before_load = car.load
+        car.load = max(0, car.load - ticket.passengers)
+        if car.load == 0:
+            car.direction = "idle"
+        detail = (
+            f"乘客取消，{car.label} 载荷回退 {before_load}→{car.load}"
+            + ("，轿厢恢复空闲" if car.load == 0 else "")
+        )
     db.add(
         DispatchLog(
             call_id=ticket.id,
             car_id=car.id if car else None,
-            detail="乘客取消",
+            detail=detail,
         )
     )
     db.commit()
@@ -138,7 +155,10 @@ def replay(db: Session = Depends(get_db)):
 
 @api_router.get("/congestion", response_model=list[CongestionFloor])
 def congestion(db: Session = Depends(get_db)):
-    waiting = db.scalars(select(CallTicket).where(CallTicket.status.in_(("waiting", "cancelled", "assigned")))).all()
+    # 仅未派工的呼梯构成楼层等待；已派工的乘客计入轿厢载荷，已取消/拒派为终态
+    waiting = db.scalars(
+        select(CallTicket).where(CallTicket.status == "waiting")
+    ).all()
     counts = congestion_by_floor(
         [CallRequest(c.id, c.floor, c.direction, c.passengers) for c in waiting]
     )
